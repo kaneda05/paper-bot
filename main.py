@@ -14,7 +14,7 @@ KEYWORDS = ["natural language processing", "Generation AI", "Advertising"]
 
 def fetch_arxiv_paper(keyword):
     url = "http://export.arxiv.org/api/query"
-    random_start_index = random.randint(0, 49)
+    random_start_index = random.randint(0, 10)
     params = {
         "search_query": f'all:"{keyword}"',
         "start": random_start_index,
