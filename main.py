@@ -5,75 +5,80 @@ import random
 import xml.etree.ElementTree as ET
 from google import genai
 
-# GitHub SecretsからAPIキーを取得
+# ==========================================
+# 設定エリア：ここを書き換えるだけでOK
+# ==========================================
+# 検索したいキーワードをリストで指定（複数指定すると「いずれかを含む」になります）
+KEYWORDS = ["Advertising", "Marketing Automation", "Ad Tech"]
+# 取得する論文の数
+NUM_PAPERS = 5
+# ==========================================
+
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_USER_ID = os.getenv('LINE_USER_ID')
 
-KEYWORDS = ["natural language processing", "Generation AI", "Advertising"]
+def build_arxiv_query(keywords):
+    """キーワードリストからarXiv用の検索クエリ文字列を作成する"""
+    # 例: (all:"Advertising" OR all:"Marketing Automation") という形式にする
+    query_parts = [f'all:"{k}"' for k in keywords]
+    return "(" + " OR ".join(query_parts) + ")"
 
-def fetch_arxiv_paper(keyword):
+def fetch_arxiv_papers(query, num_papers=5):
+    """arXiv APIから本物の論文データを取得する"""
     url = "http://export.arxiv.org/api/query"
-    random_start_index = random.randint(0, 10)
+    # 毎回同じ結果にならないよう、少しランダムに開始位置をずらす
+    random_start = random.randint(0, 20)
+    
     params = {
-        "search_query": f'all:"{keyword}"',
-        "start": random_start_index,
-        "max_results": 1,
+        "search_query": query,
+        "start": random_start,
+        "max_results": num_papers,
         "sortBy": "submittedDate",
         "sortOrder": "descending"
     }
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            time.sleep(3)
-            response = requests.get(url, params=params, timeout=15)
-            if response.status_code == 429:
-                time.sleep(15 * (attempt + 1))
-                continue
-            response.raise_for_status()
-            root = ET.fromstring(response.text)
-            ns = {'atom': 'http://www.w3.org/2005/Atom'}
-            entry = root.find('atom:entry', ns)
-            if entry is None: return None
-            title = entry.find('atom:title', ns).text.replace('\n', ' ').strip()
-            abstract = entry.find('atom:summary', ns).text.replace('\n', ' ').strip()
-            published = entry.find('atom:published', ns).text[:10]
-            link = entry.find('atom:id', ns).text
-            return {'title': title, 'abstract': abstract, 'year': published, 'id': link}
-        except:
-            if attempt < max_retries - 1: time.sleep(5)
-            else: return None
-    return None
+    
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        root = ET.fromstring(response.text)
+        ns = {'atom': 'http://www.w3.org/2005/Atom'}
+        
+        papers = []
+        for entry in root.findall('atom:entry', ns):
+            papers.append({
+                'title': entry.find('atom:title', ns).text.replace('\n', ' ').strip(),
+                'abstract': entry.find('atom:summary', ns).text.replace('\n', ' ').strip(),
+                'year': entry.find('atom:published', ns).text[:10],
+                'id': entry.find('atom:id', ns).text
+            })
+        return papers
+    except Exception as e:
+        print(f"Fetch error: {e}")
+        return []
 
 def summarize_paper(paper_data, client):
+    """Geminiによる高品質な要約生成"""
     prompt = f"""
-あなたは最新テクノロジーを分かりやすく解説する、優秀なITコンサルタントです。
-以下の英語論文の要約（Abstract）を分析し、中高生でも理解できるレベルまで噛み砕いて日本語で要約してください。
+あなたは日本の大手広告代理店のシニアコンサルタントです。
+以下の論文を読み、日本の広告実務に即した要約とアドバイスを作成してください。
 
-【絶対遵守のルール】
-1. AIとしての挨拶、前置き、後書き、自己紹介、感想は「一切」出力しないでください。
-2. 口調は、感情を交えないプロフェッショナルな「です・ます」調で統一してください。
-3. 専門用語が登場する場合は、必ず「適切な日本語訳（English Term）」の形式で併記してください。
-4. 以下の【出力フォーマット】の項目名と構造に完全に絶対に従い、それ以外のテキストは出力しないでください。
+・タイトル: {paper_data['title']}
+・内容: {paper_data['abstract']}
 
-【論文タイトル】: {paper_data['title']}
-【内容】: {paper_data['abstract']}
+【出力形式】
+■ 背景・課題
+■ 解決アプローチ
+■ 結論・成果
+💡 実務への落とし込みアイデア（日本の現場視点で2〜3行）
 
-【出力フォーマット】
-■ 背景・目的
-（概要を記載）
-
-■ アプローチ
-（手法を記載）
-
-■ 結論・知見
-（成果を記載）
+※専門用語（ROAS, CVR等）を適切に使い、ビジネス日本語で記述すること。前置きは不要。
 """
     try:
         response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         return response.text
-    except Exception as e:
-        return f"⚠️ 要約エラー: {e}"
+    except:
+        return "要約生成に失敗しました。"
 
 def send_to_line(message):
     url = "https://api.line.me/v2/bot/message/push"
@@ -83,18 +88,27 @@ def send_to_line(message):
 
 def main():
     if not all([GEMINI_API_KEY, LINE_CHANNEL_ACCESS_TOKEN, LINE_USER_ID]):
-        print("❌ 必要な環境変数が設定されていません。")
         return
+        
     client = genai.Client(api_key=GEMINI_API_KEY)
-    for kw in KEYWORDS:
-        paper = fetch_arxiv_paper(kw)
-        if paper:
-            summary = summarize_paper(paper, client)
-            msg = (f"━━━━━━━━━━━━━━\n🌟 【{kw}】最新論文レポート\n━━━━━━━━━━━━━━\n"
-                   f"📖 TITLE: {paper['title']}\n📅 PUBLISHED: {paper['year']}\n━━━━━━━━━━━━━━\n\n"
-                   f"{summary}\n\n🔗 論文詳細: {paper['id']}\n━━━━━━━━━━━━━━")
-            send_to_line(msg)
-            time.sleep(10)
+    
+    # 検索クエリの組み立て
+    query = build_arxiv_query(KEYWORDS)
+    print(f"Searching for: {query}")
+    
+    papers = fetch_arxiv_papers(query, NUM_PAPERS)
+    
+    if not papers:
+        send_to_line("⚠️ 論文が見つかりませんでした。")
+        return
+        
+    for i, paper in enumerate(papers):
+        summary = summarize_paper(paper, client)
+        msg = (f"━━━━━━━━━━━━━━\n🌟 広告論文速報 ({i+1}/{NUM_PAPERS})\n━━━━━━━━━━━━━━\n"
+               f"📖 {paper['title']}\n📅 {paper['year']}\n━━━━━━━━━━━━━━\n\n"
+               f"{summary}\n\n🔗 原文: {paper['id']}\n━━━━━━━━━━━━━━")
+        send_to_line(msg)
+        time.sleep(5)
 
 if __name__ == "__main__":
     main()
